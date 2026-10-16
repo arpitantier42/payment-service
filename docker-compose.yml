@@ -1,0 +1,42 @@
+# Local stack: order-db (Postgres) + migrations + order-service.
+#   docker compose up --build
+services:
+  order-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: orders
+    ports:
+      - "5433:5432"
+    volumes:
+      - order-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders -d orders"]
+      interval: 2s
+      retries: 15
+
+  order-db-migrate:
+    build: .
+    command: ["node", "src/shared/migrate.js", "db/order-db/migrations"]
+    environment:
+      DATABASE_URL: postgres://orders:orders@order-db:5432/orders
+    depends_on:
+      order-db:
+        condition: service_healthy
+
+  order-service:
+    build: .
+    command: ["node", "src/order-service/server.js"]
+    environment:
+      DATABASE_URL: postgres://orders:orders@order-db:5432/orders
+      ORDER_SERVICE_PORT: "3001"
+      ORDER_SERVICE_BEARER_TOKENS: ${ORDER_SERVICE_BEARER_TOKENS:-dev-token}
+    ports:
+      - "3001:3001"
+    depends_on:
+      order-db-migrate:
+        condition: service_completed_successfully
+
+volumes:
+  order-db-data:
