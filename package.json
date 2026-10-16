@@ -1,0 +1,22 @@
+{
+  "name": "order-payment-processing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start:order-service": "node src/order-service/server.js",
+    "migrate:order-db": "node src/shared/migrate.js db/order-db/migrations",
+    "test": "node --test --test-reporter=spec test/*/*.test.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "pg-mem": "^3.0.5",
+    "supertest": "^7.1.0"
+  }
+}
