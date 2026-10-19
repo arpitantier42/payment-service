@@ -1,16 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import express from 'express';
-import { bearerAuth } from '../shared/auth.js';
+import { apiKeyAuth, bearerAuth } from '../shared/auth.js';
 import { errorHandler, sendError, UUID_RE } from '../shared/errors.js';
-import { OrderStatus } from './orderStatus.js';
-import { validateCreateOrder } from './validation.js';
+import { checkTransition, OrderStatus } from './orderStatus.js';
+import { validateCreateOrder, validateStatusUpdate } from './validation.js';
 
 /**
  * Builds the order-service HTTP app.
  * @param {{ orders: ReturnType<import('./orderRepository.js').createOrderRepository>,
- *           bearerTokens: string[], now?: () => Date }} deps
+ *           bearerTokens: string[], apiKeys?: string[], now?: () => Date }} deps
  */
-export function createApp({ orders, bearerTokens, now = () => new Date() }) {
+export function createApp({ orders, bearerTokens, apiKeys = [], now = () => new Date() }) {
   const app = express();
   app.disable('x-powered-by');
   app.use(express.json({ limit: '100kb' }));
@@ -18,6 +18,7 @@ export function createApp({ orders, bearerTokens, now = () => new Date() }) {
   app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
   const requireBearer = bearerAuth(bearerTokens);
+  const requireApiKey = apiKeyAuth(apiKeys);
 
   // OP-001 createOrder · REQ-001
   app.post('/orders', requireBearer, async (req, res) => {
@@ -43,6 +44,40 @@ export function createApp({ orders, bearerTokens, now = () => new Date() }) {
       return sendError(res, 404, 'order_not_found', 'no order exists with the given id');
     }
     res.json(order);
+  });
+
+  // OP-003 updateOrderPaymentStatus · REQ-009
+  // Called by payment-service / reconciliation-worker with the order status a payment outcome
+  // maps to (SUCCESS -> PAID, FAILED/EXPIRED -> PAYMENT_FAILED). Same status again is a 200 no-op.
+  app.patch('/orders/:orderId/status', requireApiKey, async (req, res) => {
+    const { value, errors } = validateStatusUpdate(req.body);
+    if (errors) {
+      return sendError(res, 400, 'validation_failed', 'status is missing or invalid', errors);
+    }
+    const { orderId } = req.params;
+    const id = UUID_RE.test(orderId) ? orderId.toLowerCase() : null;
+
+    // Validate against the current status, then compare-and-set; if a concurrent update won
+    // the race, re-read and re-validate against the new status.
+    for (;;) {
+      const order = id ? await orders.findById(id) : null;
+      if (!order) {
+        return sendError(res, 404, 'order_not_found', 'no order exists with the given id');
+      }
+      const check = checkTransition(order.status, value.status);
+      if (check === 'unchanged') return res.json(order);
+      if (check === 'invalid') {
+        return sendError(
+          res,
+          409,
+          'invalid_status_transition',
+          `cannot change order status from ${order.status} to ${value.status}`,
+          [{ field: 'status', message: `current status is ${order.status}` }],
+        );
+      }
+      const updated = await orders.updateStatus({ id, from: order.status, to: value.status, now: now() });
+      if (updated) return res.json(updated);
+    }
   });
 
   app.use((req, res) => sendError(res, 404, 'not_found', 'route not found'));

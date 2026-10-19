@@ -29,5 +29,17 @@ export function createOrderRepository(pool) {
       const { rows } = await pool.query(`select ${COLUMNS} from orders where id = $1`, [id]);
       return rows[0] ? toOrder(rows[0]) : null;
     },
+
+    /**
+     * Compare-and-set: moves the order to `to` only if it is still in `from`. Returns the
+     * updated order, or null when the order is missing or its status changed concurrently.
+     */
+    async updateStatus({ id, from, to, now }) {
+      const { rows } = await pool.query(
+        `update orders set status = $3, updated_at = $4 where id = $1 and status = $2 returning ${COLUMNS}`,
+        [id, from, to, now],
+      );
+      return rows[0] ? toOrder(rows[0]) : null;
+    },
   };
 }

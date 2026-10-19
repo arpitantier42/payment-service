@@ -32,6 +32,7 @@ services:
       DATABASE_URL: postgres://orders:orders@order-db:5432/orders
       ORDER_SERVICE_PORT: "3001"
       ORDER_SERVICE_BEARER_TOKENS: ${ORDER_SERVICE_BEARER_TOKENS:-dev-token}
+      ORDER_SERVICE_API_KEYS: ${ORDER_SERVICE_API_KEYS:-dev-internal-key}
     ports:
       - "3001:3001"
     depends_on:

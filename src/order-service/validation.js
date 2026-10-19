@@ -1,4 +1,5 @@
 import { UUID_RE } from '../shared/errors.js';
+import { ORDER_STATUSES } from './orderStatus.js';
 
 const CURRENCY_RE = /^[A-Z]{3}$/;
 
@@ -34,4 +35,22 @@ export function validateCreateOrder(body) {
 
   if (errors.length) return { errors };
   return { value: { customerId: customer_id.toLowerCase(), totalAmount: total_amount, currency } };
+}
+
+/**
+ * Validates an updateOrderPaymentStatus body (an `Order`). Only `status` is read; every other
+ * Order field is server-owned or immutable and ignored if sent.
+ */
+export function validateStatusUpdate(body) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return { errors: [{ field: 'body', message: 'must be a JSON object' }] };
+  }
+  const { status } = body;
+  if (status === undefined || status === null) {
+    return { errors: [{ field: 'status', message: 'is required' }] };
+  }
+  if (!ORDER_STATUSES.includes(status)) {
+    return { errors: [{ field: 'status', message: `must be one of ${ORDER_STATUSES.join(', ')}` }] };
+  }
+  return { value: { status } };
 }
