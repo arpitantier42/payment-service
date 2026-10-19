@@ -51,6 +51,24 @@ function toAuditLogEntry(row) {
   };
 }
 
+const WEBHOOK_COLUMNS =
+  'id, gateway_event_id, payment_id, signature_valid, status, outcome, raw_payload, received_at, processed_at';
+
+/** Maps a `webhook_events` row to the API `WebhookEvent` shape (plus `outcome`). */
+function toWebhookEvent(row) {
+  return {
+    id: row.id,
+    gateway_event_id: row.gateway_event_id,
+    payment_id: row.payment_id ?? null,
+    signature_valid: row.signature_valid,
+    status: row.status,
+    outcome: row.outcome ?? null,
+    raw_payload: typeof row.raw_payload === 'string' ? JSON.parse(row.raw_payload) : row.raw_payload,
+    received_at: iso(row.received_at),
+    processed_at: row.processed_at ? iso(row.processed_at) : null,
+  };
+}
+
 export const isUniqueViolation = (err) => err?.code === '23505';
 
 async function insertAudit(db, { paymentId, eventType, previousStatus = null, newStatus, actor, metadata = null, now }) {
@@ -97,6 +115,7 @@ export function createPaymentRepository(pool) {
     /** Returns `{ payment, checkoutSession }` (session null until the gateway accepted) or null. */
     findById: (id) => findOne('id', id),
     findByIdempotencyKey: (key) => findOne('idempotency_key', key),
+    findByGatewayReference: (reference) => findOne('gateway_reference', reference),
 
     /**
      * Inserts the payment (status from `payment.status`, normally INITIATED) with its
@@ -187,6 +206,46 @@ export function createPaymentRepository(pool) {
     /** Appends an audit entry for an event that does not change `payments` (e.g. a failed gateway call). */
     async recordEvent({ paymentId, eventType, status, actor, metadata, now }) {
       await insertAudit(pool, { paymentId, eventType, previousStatus: status, newStatus: status, actor, metadata, now });
+    },
+
+    /** Marks the payment's ACTIVE checkout session COMPLETED (the customer finished checkout). */
+    async completeCheckoutSession(paymentId) {
+      await pool.query(`update checkout_sessions set status = 'COMPLETED' where payment_id = $1 and status = 'ACTIVE'`, [
+        paymentId,
+      ]);
+    },
+
+    /**
+     * Records a verified webhook delivery as RECEIVED, deduped by gateway event id (REQ-010).
+     * Returns `{ event, duplicate }`: on a repeat delivery, `event` is the stored one and
+     * `duplicate` is true.
+     */
+    async recordWebhookEvent({ gatewayEventId, rawPayload, signatureValid, now }) {
+      try {
+        const { rows } = await pool.query(
+          `insert into webhook_events (${WEBHOOK_COLUMNS})
+           values ($1, $2, null, $3, 'RECEIVED', null, $4, $5, null) returning ${WEBHOOK_COLUMNS}`,
+          [randomUUID(), gatewayEventId, signatureValid, JSON.stringify(rawPayload), now],
+        );
+        return { event: toWebhookEvent(rows[0]), duplicate: false };
+      } catch (err) {
+        if (!isUniqueViolation(err)) throw err;
+        const { rows } = await pool.query(`select ${WEBHOOK_COLUMNS} from webhook_events where gateway_event_id = $1`, [
+          gatewayEventId,
+        ]);
+        return { event: toWebhookEvent(rows[0]), duplicate: true };
+      }
+    },
+
+    /** Moves a webhook event on (VERIFIED / REJECTED / APPLIED); `processedAt` once it is final. */
+    async updateWebhookEvent({ id, status, paymentId = null, outcome = null, processedAt = null }) {
+      const { rows } = await pool.query(
+        `update webhook_events set status = $2, payment_id = coalesce($3, payment_id), outcome = coalesce($4, outcome),
+           processed_at = coalesce($5, processed_at)
+         where id = $1 returning ${WEBHOOK_COLUMNS}`,
+        [id, status, paymentId, outcome, processedAt],
+      );
+      return rows[0] ? toWebhookEvent(rows[0]) : null;
     },
 
     async listAuditEntries(paymentId) {

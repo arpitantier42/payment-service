@@ -66,14 +66,18 @@ describe('encrypted secrets manager', () => {
     );
     const sealed = env.PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED;
     assert.match(sealed, /^v1\./);
-    const { keyId, keySecret } = await createEncryptedSecretsManager({
+    const manager = createEncryptedSecretsManager({
       encryptedGatewayCredentials: sealed,
+      encryptedWebhookSecret: env.PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED,
       masterKey: env.SECRETS_MASTER_KEY,
-    }).getGatewayCredentials();
+    });
+    const { keyId, keySecret } = await manager.getGatewayCredentials();
+    const webhookSecret = await manager.getWebhookSecret();
     for (const file of ['../../.env.example', '../../docker-compose.yml']) {
       const text = await readFile(new URL(file, import.meta.url), 'utf8');
       assert.ok(!text.includes(keySecret), `${file} contains the plaintext gateway secret`);
       assert.ok(!text.includes(keyId), `${file} contains the plaintext gateway key id`);
+      assert.ok(!text.includes(webhookSecret), `${file} contains the plaintext webhook secret`);
     }
   });
 
