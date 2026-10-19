@@ -22,3 +22,18 @@ export function bearerAuth(tokens) {
     next();
   };
 }
+
+/**
+ * `api_key` security scheme for internal service-to-service endpoints: requires an
+ * `X-API-Key` header matching one of `keys` (from configuration).
+ */
+export function apiKeyAuth(keys) {
+  const allowed = keys.filter(Boolean);
+  return (req, res, next) => {
+    const key = req.get('x-api-key') ?? '';
+    if (!key || !allowed.some((k) => safeEqual(k, key))) {
+      return sendError(res, 401, 'unauthorized', 'a valid X-API-Key header is required');
+    }
+    next();
+  };
+}
