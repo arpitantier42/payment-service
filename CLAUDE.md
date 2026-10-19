@@ -25,7 +25,7 @@ src/payment-service/  app.js, server.js, paymentRepository.js (SQL + audit + web
                       (GET /orders/{id}, PATCH /orders/{id}/status), paymentOutcome.js (applyStatus +
                       notifyOrder, shared by webhook and reconciliation)
 src/reconciliation-worker/  app.js (api_key routes), server.js (env, in-process interval schedule),
-                      reconciler.js (OP-007 run). Reuses payment-service's repository, gateway,
+                      reconciler.js (OP-007 run), sessionExpirer.js (OP-008 run). Reuses payment-service's repository, gateway,
                       orderClient and paymentOutcome modules (same payment-db).
 src/customer-client/  app.js (static UI + same-origin /api BFF relaying to order-/payment-service with
                       server-held bearer tokens), server.js, mockCheckout.js (DEV-only stand-in for
@@ -48,6 +48,7 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
 - Run reconciliation-worker: payment block + worker block of `.env.example` (DATABASE_URL →
   payment-db), then `npm run start:reconciliation-worker`; trigger a run with
   `curl -X POST -H 'X-API-Key: dev-scheduler-key' localhost:3003/internal/payments/reconciliation-runs`
+  (session expiry: same with `/internal/payments/session-expiry-runs`)
 - Run customer-client: customer-client block of `.env.example` (+ `ORDER_SERVICE_URL`, and
   `SECRETS_MASTER_KEY` / `PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED` when `MOCK_CHECKOUT_ENABLED=true`),
   then `npm run start:customer-client`; open http://localhost:3000. Start payment-service with
@@ -76,7 +77,8 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   `RECONCILIATION_BATCH_SIZE` (100), plus `ORDER_SERVICE_URL`, `ORDER_SERVICE_API_KEY`,
   `ORDER_SERVICE_TIMEOUT_MS`, `PAYMENT_GATEWAY_*`, `SECRETS_MASTER_KEY`,
   `PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED`; `MOCK_GATEWAY_TRANSACTION_STATUS` (mock only, default
-  `created`).
+  `created`); `SESSION_EXPIRY_INTERVAL_MINUTES` (5; 0 = HTTP-triggered only),
+  `SESSION_EXPIRY_GRACE_SECONDS` (60).
 - payment-service, mock gateway only: `MOCK_GATEWAY_CHECKOUT_BASE_URL` (checkout_url base; default
   `https://checkout.mock.invalid`).
 - customer-client: `CUSTOMER_CLIENT_PORT` (3000), `ORDER_SERVICE_URL`, `PAYMENT_SERVICE_URL`,
@@ -199,8 +201,15 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   sends a signed `captured`/`failed` webhook, then 303 to `/?payment_id=..&order_id=..`. Tests:
   `test/customer-client/flow.test.js` runs client + order-service + payment-service end to end;
   `contract.test.js` runs the client against permissive recording stubs to prove its own checks.
-- Not yet built: `POST /internal/payments/session-expiry-runs` (OP-008). Add it to the worker app
-  next to OP-007 (same api_key), reusing `payments.expireCheckoutSession` (ACTIVE → EXPIRED only),
-  `applyStatus` to EXPIRED with actor `reconciliation_job` and `notifyOrder`. Tests:
-  `test/reconciliation-worker/reconciliation.test.js` shows a fake gateway with scripted status
-  answers, a shared mutable clock, and order-service outages via `fetchImpl`.
+- OP-008 done (as part of WI-008, for its expiry criterion): `POST
+  /internal/payments/session-expiry-runs` on the worker (same api_key; `sessionExpirer.run()`, shared
+  in-flight run, own interval). Purely time-based, no gateway call: `findLapsedCheckoutSessions`
+  (ACTIVE, `expires_at <= now - grace`, oldest first, batch) → per payment status: INITIATED →
+  `applyStatus` EXPIRED (eventType `SESSION_EXPIRED`, actor `reconciliation_job`) + session EXPIRED +
+  `notifyOrder` (→ PAYMENT_FAILED; a failure leaves `order_notification_status` FAILED, re-sent by the
+  reconciliation run); PENDING → session EXPIRED only, payment left to webhook/reconciliation
+  (SESSION_EXPIRY_DEFERRED audit, outcome `deferred`); SUCCESS/FAILED → session COMPLETED
+  (`already_resolved`); EXPIRED → `unchanged`. 200 body `{ run_id, started_at, finished_at, cutoff,
+  grace_seconds, examined, outcomes, sessions: [...] }`. Tests:
+  `test/reconciliation-worker/sessionExpiry.test.js`; `reconciliation.test.js` shows a fake gateway
+  with scripted status answers, a shared mutable clock, and order-service outages via `fetchImpl`.

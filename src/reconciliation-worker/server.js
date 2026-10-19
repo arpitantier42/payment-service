@@ -5,6 +5,7 @@ import { createOrderClient } from '../payment-service/orderClient.js';
 import { createPaymentRepository } from '../payment-service/paymentRepository.js';
 import { createApp } from './app.js';
 import { createReconciler } from './reconciler.js';
+import { createSessionExpirer } from './sessionExpirer.js';
 
 const env = process.env;
 const port = Number(env.RECONCILIATION_WORKER_PORT ?? 3003);
@@ -70,7 +71,14 @@ const reconciler = createReconciler({
   gatewayRetryPolicy: retryPolicy,
 });
 
-const app = createApp({ reconciler, apiKeys });
+const sessionExpirer = createSessionExpirer({
+  payments: createPaymentRepository(pool),
+  orders,
+  graceMs: int('SESSION_EXPIRY_GRACE_SECONDS', 60) * 1000,
+  batchSize: Math.max(1, int('RECONCILIATION_BATCH_SIZE', 100)),
+});
+
+const app = createApp({ reconciler, sessionExpirer, apiKeys });
 const server = app.listen(port, () => console.log(`reconciliation-worker listening on :${port} (gateway: ${gateway.name})`));
 
 // The schedule (default every 15 minutes); 0 leaves triggering to an external scheduler.
@@ -85,8 +93,22 @@ async function scheduledRun() {
 }
 const timer = intervalMinutes > 0 ? setInterval(scheduledRun, intervalMinutes * 60 * 1000) : null;
 
+// OP-008 schedule (default every 5 minutes, so a session is expired at most TTL + grace + 5 min
+// after creation); 0 leaves triggering to an external scheduler.
+const expiryIntervalMinutes = int('SESSION_EXPIRY_INTERVAL_MINUTES', 5);
+async function scheduledExpiry() {
+  try {
+    const run = await sessionExpirer.run();
+    if (run.examined) console.log(`session expiry run ${run.run_id}: examined ${run.examined} ${JSON.stringify(run.outcomes)}`);
+  } catch (err) {
+    console.error(`session expiry run failed: ${err.stack ?? err}`);
+  }
+}
+const expiryTimer = expiryIntervalMinutes > 0 ? setInterval(scheduledExpiry, expiryIntervalMinutes * 60 * 1000) : null;
+
 function shutdown() {
   if (timer) clearInterval(timer);
+  if (expiryTimer) clearInterval(expiryTimer);
   server.close(() => pool.end().then(() => process.exit(0)));
 }
 process.on('SIGTERM', shutdown);

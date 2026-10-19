@@ -7,10 +7,11 @@ import { errorHandler, sendError } from '../shared/errors.js';
  * scheduler (the in-process interval in server.js, or an external cron presenting a key).
  * @param {{
  *   reconciler: { run(): Promise<object> },
+ *   sessionExpirer?: { run(): Promise<object> },   // OP-008; route mounted when given
  *   apiKeys: string[],               // scheduler credentials (X-API-Key)
  * }} deps
  */
-export function createApp({ reconciler, apiKeys }) {
+export function createApp({ reconciler, sessionExpirer, apiKeys }) {
   const app = express();
   app.disable('x-powered-by');
 
@@ -28,6 +29,14 @@ export function createApp({ reconciler, apiKeys }) {
   app.post('/internal/payments/reconciliation-runs', requireApiKey, async (req, res) => {
     res.status(200).json(await reconciler.run());
   });
+
+  // OP-008 expireCheckoutSessions · REQ-006, REQ-008, REQ-009 (REQ-011 audit)
+  // 200 with the run summary once the batch completes; failed records stay ACTIVE for the next run.
+  if (sessionExpirer) {
+    app.post('/internal/payments/session-expiry-runs', requireApiKey, async (req, res) => {
+      res.status(200).json(await sessionExpirer.run());
+    });
+  }
 
   app.use((req, res) => sendError(res, 404, 'not_found', 'route not found'));
   app.use(errorHandler);

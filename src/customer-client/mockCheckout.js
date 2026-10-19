@@ -29,7 +29,7 @@ export function createMockCheckoutRouter({ getPayment, webhookUrl, getWebhookSec
       return null;
     }
     const session = payment.checkout_session;
-    if (!['INITIATED', 'PENDING'].includes(payment.status)) {
+    if (!['INITIATED', 'PENDING', 'EXPIRED'].includes(payment.status)) {
       page(res, 409, 'Checkout already completed', `<p>This payment is already ${esc(payment.status)}.</p>${backLink(payment)}`);
       return null;
     }

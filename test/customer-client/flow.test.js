@@ -10,6 +10,7 @@ import { createApp as createPaymentApp } from '../../src/payment-service/app.js'
 import { createMockGateway } from '../../src/payment-service/gateway.js';
 import { createOrderClient } from '../../src/payment-service/orderClient.js';
 import { createPaymentRepository } from '../../src/payment-service/paymentRepository.js';
+import { createSessionExpirer } from '../../src/reconciliation-worker/sessionExpirer.js';
 import { createEncryptedSecretsManager, encryptSecret } from '../../src/shared/secrets.js';
 import { createTestPool } from '../helpers/db.js';
 
@@ -253,6 +254,32 @@ describe('customer-client: bounded checkout window (REQ-006)', () => {
     const pay = await client.post(checkoutPath(init.body)).type('form').send({ payment_method: 'card', outcome: 'pay' });
     assert.equal(pay.status, 410);
     assert.notEqual((await client.get(`/api/payments/${init.body.id}`)).body.status, 'SUCCESS');
+  });
+
+  it('the session-expiry run marks the lapsed session and payment EXPIRED for every reader, and the order can be paid again', async () => {
+    const order = await placeOrder();
+    const init = await initiate(order);
+    clock = new Date(new Date(init.body.checkout_session.expires_at).getTime() + 2 * 60 * 1000);
+
+    const expirer = createSessionExpirer({
+      payments: createPaymentRepository(paymentPool),
+      orders: createOrderClient({ baseUrl: base(servers[0]), token: ORDER_TOKEN, apiKey: ORDER_API_KEY, retryPolicy: { attempts: 1 } }),
+      now: () => new Date(clock),
+    });
+    assert.deepEqual((await expirer.run()).outcomes, { expired: 1 });
+
+    // Stored state, not just a read-time computation: any API consumer sees it.
+    const payment = (await client.get(`/api/payments/${init.body.id}`)).body;
+    assert.equal(payment.status, 'EXPIRED');
+    assert.equal(payment.checkout_session.status, 'EXPIRED');
+    assert.deepEqual(checkoutAction(payment, clock), { action: 'final', status: 'EXPIRED' });
+    assert.equal((await client.get(checkoutPath(init.body))).status, 410);
+    const failedOrder = (await client.get(`/api/orders/${order.id}`)).body;
+    assert.equal(failedOrder.status, 'PAYMENT_FAILED');
+
+    const retry = await initiate(failedOrder, { method: 'upi' });
+    assert.equal(retry.status, 201);
+    assert.equal(retry.body.checkout_session.status, 'ACTIVE');
   });
 
   it('an invalidated (non-ACTIVE) session is refused before its expiry time', async () => {

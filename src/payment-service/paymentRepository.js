@@ -236,6 +236,20 @@ export function createPaymentRepository(pool) {
       return rows.map(toPayment);
     },
 
+    /**
+     * REQ-006 (OP-008): payment ids whose checkout session is still ACTIVE with `expires_at` at or
+     * before `cutoff`, longest-lapsed first, at most `limit` (session-expiry batch).
+     */
+    async findLapsedCheckoutSessions({ cutoff, limit }) {
+      const { rows } = await pool.query(
+        `select payment_id from checkout_sessions
+         where status = 'ACTIVE' and expires_at <= $1
+         order by expires_at, id limit $2`,
+        [cutoff, limit],
+      );
+      return rows.map((r) => r.payment_id);
+    },
+
     /** Records how the order-service notification for this payment ended (SENT | REJECTED | FAILED). */
     async setOrderNotificationStatus(paymentId, status) {
       await pool.query('update payments set order_notification_status = $2 where id = $1', [paymentId, status]);
