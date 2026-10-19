@@ -27,21 +27,54 @@ export function buildOrderRequest({ customerId, totalAmount, currency }) {
 }
 
 /**
+ * REQ-001: true when a createOrder 201 body is what the client relies on: a new order with a UUID
+ * id (the order_id later sent to payment-service) in status PENDING_PAYMENT.
+ */
+export function isPendingOrder(order) {
+  return (
+    !!order &&
+    typeof order.id === 'string' &&
+    UUID_RE.test(order.id) &&
+    order.status === 'PENDING_PAYMENT' &&
+    Number.isSafeInteger(order.total_amount) &&
+    typeof order.currency === 'string'
+  );
+}
+
+/**
+ * REQ-002: validates a POST /payments body + Idempotency-Key. Every field is required: a request
+ * missing the order id, amount, currency or payment method is rejected. Used by the browser
+ * before sending and by the client's server (app.js) before anything is forwarded.
+ * Returns `{ value }` (the body to send) or `{ errors: [{ field, message }] }`.
+ */
+export function validatePaymentRequest(body, idempotencyKey) {
+  const errors = [];
+  if (typeof idempotencyKey !== 'string' || !/^[\x21-\x7e]{1,255}$/.test(idempotencyKey)) {
+    errors.push({ field: 'Idempotency-Key', message: 'header is required' });
+  }
+  const b = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  if (typeof b.order_id !== 'string' || !UUID_RE.test(b.order_id)) errors.push({ field: 'order_id', message: 'is required (a UUID)' });
+  if (!Number.isSafeInteger(b.amount) || b.amount <= 0) errors.push({ field: 'amount', message: 'is required (positive integer, minor units)' });
+  if (typeof b.currency !== 'string' || !CURRENCY_RE.test(b.currency)) errors.push({ field: 'currency', message: 'is required (ISO 4217)' });
+  if (!PAYMENT_METHODS.includes(b.payment_method)) {
+    errors.push({ field: 'payment_method', message: `is required (one of ${PAYMENT_METHODS.join(', ')})` });
+  }
+  if (errors.length) return { errors };
+  return { value: { order_id: b.order_id.toLowerCase(), amount: b.amount, currency: b.currency, payment_method: b.payment_method } };
+}
+
+/**
  * REQ-002: body for POST /payments from the placed order and the chosen method. A request missing
  * the order id, amount, currency or payment method is rejected here, before anything is sent
- * (payment-service rejects it again with 400). Amount and currency come from the order, which
- * payment-service re-checks against order-service anyway.
+ * (the client's server and payment-service reject it again with 400). Amount and currency come
+ * from the order, which payment-service re-checks against order-service anyway.
  */
 export function buildPaymentRequest({ order, paymentMethod }) {
-  const errors = [];
-  if (!order || typeof order.id !== 'string' || !UUID_RE.test(order.id)) errors.push({ field: 'order_id', message: 'is required' });
-  if (!Number.isSafeInteger(order?.total_amount) || order.total_amount <= 0) errors.push({ field: 'amount', message: 'is required' });
-  if (typeof order?.currency !== 'string' || !CURRENCY_RE.test(order.currency)) errors.push({ field: 'currency', message: 'is required' });
-  if (!PAYMENT_METHODS.includes(paymentMethod)) errors.push({ field: 'payment_method', message: 'choose a payment method' });
-  if (errors.length) return { errors };
-  return {
-    value: { order_id: order.id, amount: order.total_amount, currency: order.currency, payment_method: paymentMethod },
-  };
+  const { value, errors } = validatePaymentRequest(
+    { order_id: order?.id, amount: order?.total_amount, currency: order?.currency, payment_method: paymentMethod },
+    'unused',
+  );
+  return errors ? { errors } : { value };
 }
 
 /**

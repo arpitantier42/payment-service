@@ -185,14 +185,20 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   (card | upi | netbanking) → `POST /api/payments` with an `Idempotency-Key` minted per order+request
   in sessionStorage (`createIdempotencyKeys`; reused on retry, forgotten after FAILED/EXPIRED) →
   `checkoutAction(payment, now)` redirects only to an ACTIVE, unexpired session with an http(s)
-  checkout_url → back at `/?payment_id=` it polls `GET /api/payments/{id}` until final. `/api/*`
+  checkout_url → back at `/?payment_id=` it polls `GET /api/payments/{id}` until final. The BFF
+  enforces REQ-001/002 itself with the browser's validators (`public/checkout.js`), not only the
+  services: `POST /api/orders` validates (`buildOrderRequest`, 400) and answers 502
+  `unexpected_order_response` unless the 201 is a UUID-id PENDING_PAYMENT order (`isPendingOrder`);
+  `POST /api/payments` validates body + key (`validatePaymentRequest`, 400; methods card | upi |
+  netbanking), then GETs the order (404 `order_not_found` / 503) before forwarding. Otherwise `/api/*`
   relays status + body unchanged (503 `<service>_unavailable` if unreachable), sends only the
   schema's client fields, `Cache-Control: no-store`; all responses carry a `default-src 'self'` CSP
   (no inline scripts/styles in pages). Customer id is a per-browser random UUID (placeholder for a
   login). `/mock-checkout/{paymentId}` (dev): 410 if the session is not ACTIVE or past `expires_at`,
   409 if the payment already has an outcome, 400 for a method other than the one chosen; pay/decline
   sends a signed `captured`/`failed` webhook, then 303 to `/?payment_id=..&order_id=..`. Tests:
-  `test/customer-client/flow.test.js` runs client + order-service + payment-service end to end.
+  `test/customer-client/flow.test.js` runs client + order-service + payment-service end to end;
+  `contract.test.js` runs the client against permissive recording stubs to prove its own checks.
 - Not yet built: `POST /internal/payments/session-expiry-runs` (OP-008). Add it to the worker app
   next to OP-007 (same api_key), reusing `payments.expireCheckoutSession` (ACTIVE → EXPIRED only),
   `applyStatus` to EXPIRED with actor `reconciliation_job` and `notifyOrder`. Tests:
