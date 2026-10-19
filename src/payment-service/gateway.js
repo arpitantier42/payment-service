@@ -123,6 +123,16 @@ const TRANSACTION_STATUS_MAP = Object.freeze({
 });
 
 /**
+ * Provider states meaning "checkout open, the customer has not attempted a payment yet": nothing
+ * is in flight at the gateway, so the payment is not PENDING (REQ-008's unresolved transaction).
+ */
+const AWAITING_CUSTOMER_STATES = new Set(['created', 'open', 'requires_payment_method']);
+
+/** True when a status-query `gatewayStatus` says the customer has not attempted payment yet. */
+export const isAwaitingCustomer = (gatewayStatus) =>
+  typeof gatewayStatus === 'string' && AWAITING_CUSTOMER_STATES.has(gatewayStatus.toLowerCase());
+
+/**
  * Normalises a status-query body to `{ status, gatewayStatus, gatewayReference, amount, currency }`
  * (amount/currency/reference null when absent), or null when the status is not recognised.
  */
