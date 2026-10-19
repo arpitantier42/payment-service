@@ -109,6 +109,13 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   GATEWAY_CALL_FAILED audit (reconciliation or same-key retry resolves it); a 4xx rejection marks
   it FAILED (GATEWAY_REJECTED audit). Payment states: INITIATED → PENDING|SUCCESS|FAILED|EXPIRED,
   PENDING → SUCCESS|FAILED|EXPIRED; others terminal.
+- WI-004 done: `GET /payments/{paymentId}` hardened + REQ-011 QA. Bearer-only (401 before any
+  lookup, also for unknown ids; X-API-Key does not satisfy it), reads payment-db only (no
+  order-service/gateway call, no writes), returns the stored status. All `/payments*` responses
+  carry `Cache-Control: no-store`. Tests: `assertAuditTrailComplete` in `payments.test.js` checks
+  that status-changing audit entries chain from PAYMENT_INITIATED to the current status — reuse
+  it for webhook/reconciliation tests; `clients.test.js` checks `.env.example`/compose hold only
+  sealed gateway credentials.
 - Not yet built: webhook (`POST /webhooks/payments`, `webhook_events` table — add as a new
   payment-db migration), reconciliation-worker. They call the order PATCH with `X-API-Key`
   (configure a key from `ORDER_SERVICE_API_KEYS` in their env). `payments.order_id` has no FK

@@ -45,6 +45,12 @@ export function createApp({
 
   const requireBearer = bearerAuth(bearerTokens);
 
+  // REQ-011: payment details are per-caller and change over time; shared caches must not keep them.
+  app.use('/payments', (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
+
   /**
    * Steps 4-6 of OP-004: fetch credentials (decrypted per call, never stored), create the checkout
    * session with retries, store it. Returns `{ payment, checkoutSession }`, or null when the gateway
@@ -212,6 +218,8 @@ export function createApp({
   });
 
   // OP-005 getPayment · REQ-011
+  // Bearer-authenticated (401 before any lookup); reads payment-db only, never the gateway or
+  // order-service, so it reports the stored status (webhook/reconciliation keep it current).
   app.get('/payments/:paymentId', requireBearer, async (req, res) => {
     const { paymentId } = req.params;
     // A malformed id cannot reference an existing payment.

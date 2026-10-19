@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import { createHttpGateway } from '../../src/payment-service/gateway.js';
 import { createOrderClient } from '../../src/payment-service/orderClient.js';
@@ -54,6 +55,26 @@ describe('encrypted secrets manager', () => {
     const parts = sealed.split('.');
     parts[3] = Buffer.from('y').toString('base64url');
     assert.throws(() => decryptSecret(parts.join('.'), masterKey));
+  });
+
+  it('ships only sealed gateway credentials in the sample config (REQ-011, NFR-002)', async () => {
+    const env = Object.fromEntries(
+      (await readFile(new URL('../../.env.example', import.meta.url), 'utf8'))
+        .split('\n')
+        .filter((line) => /^[A-Z_]+=/.test(line))
+        .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+    );
+    const sealed = env.PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED;
+    assert.match(sealed, /^v1\./);
+    const { keyId, keySecret } = await createEncryptedSecretsManager({
+      encryptedGatewayCredentials: sealed,
+      masterKey: env.SECRETS_MASTER_KEY,
+    }).getGatewayCredentials();
+    for (const file of ['../../.env.example', '../../docker-compose.yml']) {
+      const text = await readFile(new URL(file, import.meta.url), 'utf8');
+      assert.ok(!text.includes(keySecret), `${file} contains the plaintext gateway secret`);
+      assert.ok(!text.includes(keyId), `${file} contains the plaintext gateway key id`);
+    }
   });
 
   it('decrypts gateway credentials on demand', async () => {
