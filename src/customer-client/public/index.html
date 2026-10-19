@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shop checkout</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/ui.js"></script>
+</head>
+<body>
+  <main class="card">
+    <h1>Shop</h1>
+
+    <!-- Step 1 (REQ-001): cart -> place order -->
+    <section id="cart-step">
+      <h2>Your cart</h2>
+      <table id="cart">
+        <thead><tr><th>Item</th><th>Price</th><th>Qty</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p>Total: <strong id="cart-total"></strong></p>
+      <button id="place-order" type="button">Place order</button>
+    </section>
+
+    <!-- Step 2 (REQ-002): choose method -> initiate payment -> redirect to hosted checkout -->
+    <section id="pay-step" hidden>
+      <h2>Pay for order</h2>
+      <dl>
+        <dt>Order</dt><dd id="order-id"></dd>
+        <dt>Status</dt><dd id="order-status"></dd>
+        <dt>Amount</dt><dd id="order-amount"></dd>
+      </dl>
+      <fieldset>
+        <legend>Payment method</legend>
+        <label><input type="radio" name="payment_method" value="card" checked> Card</label>
+        <label><input type="radio" name="payment_method" value="upi"> UPI</label>
+        <label><input type="radio" name="payment_method" value="netbanking"> Net banking</label>
+      </fieldset>
+      <button id="pay" type="button">Continue to payment</button>
+    </section>
+
+    <!-- Step 3 (REQ-006): back from the hosted checkout -> payment outcome -->
+    <section id="result-step" hidden>
+      <h2>Payment</h2>
+      <dl>
+        <dt>Payment</dt><dd id="payment-id"></dd>
+        <dt>Status</dt><dd id="payment-status"></dd>
+        <dt>Order status</dt><dd id="result-order-status"></dd>
+      </dl>
+      <button id="try-again" type="button" hidden>Try again</button>
+      <button id="new-order" type="button">Start a new order</button>
+    </section>
+
+    <p id="message" role="status" aria-live="polite"></p>
+  </main>
+</body>
+</html>

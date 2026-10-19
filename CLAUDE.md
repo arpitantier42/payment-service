@@ -27,6 +27,10 @@ src/payment-service/  app.js, server.js, paymentRepository.js (SQL + audit + web
 src/reconciliation-worker/  app.js (api_key routes), server.js (env, in-process interval schedule),
                       reconciler.js (OP-007 run). Reuses payment-service's repository, gateway,
                       orderClient and paymentOutcome modules (same payment-db).
+src/customer-client/  app.js (static UI + same-origin /api BFF relaying to order-/payment-service with
+                      server-held bearer tokens), server.js, mockCheckout.js (DEV-only stand-in for
+                      the gateway's hosted checkout page), public/ (browser UI, no build step:
+                      index.html, ui.js = DOM wiring, checkout.js = pure logic, also imported by tests)
 db/<db-name>/migrations/NNN_description.sql   one dir per store (order-db, payment-db)
 test/helpers/db.js    createTestPool('<db-name>') -> pg-mem pool with migrations applied
 test/<component>/*.test.js
@@ -44,9 +48,14 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
 - Run reconciliation-worker: payment block + worker block of `.env.example` (DATABASE_URL →
   payment-db), then `npm run start:reconciliation-worker`; trigger a run with
   `curl -X POST -H 'X-API-Key: dev-scheduler-key' localhost:3003/internal/payments/reconciliation-runs`
+- Run customer-client: customer-client block of `.env.example` (+ `ORDER_SERVICE_URL`, and
+  `SECRETS_MASTER_KEY` / `PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED` when `MOCK_CHECKOUT_ENABLED=true`),
+  then `npm run start:customer-client`; open http://localhost:3000. Start payment-service with
+  `MOCK_GATEWAY_CHECKOUT_BASE_URL=http://localhost:3000/mock-checkout` so checkout links land there.
 - Encrypt gateway credentials: `SECRETS_MASTER_KEY=... npm run encrypt-secret -- '{"key_id":"..","key_secret":".."}'`
 - Full local stack: `docker compose up --build` (order-db :5433, order-service :3001,
-  payment-db :5434, payment-service :3002 with the mock gateway, reconciliation-worker :3003)
+  payment-db :5434, payment-service :3002 with the mock gateway, reconciliation-worker :3003,
+  customer-client :3000 with the mock hosted checkout)
 
 ## Configuration (env, see .env.example)
 - `DATABASE_URL` — Postgres connection string for the service's store.
@@ -68,6 +77,12 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   `ORDER_SERVICE_TIMEOUT_MS`, `PAYMENT_GATEWAY_*`, `SECRETS_MASTER_KEY`,
   `PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED`; `MOCK_GATEWAY_TRANSACTION_STATUS` (mock only, default
   `created`).
+- payment-service, mock gateway only: `MOCK_GATEWAY_CHECKOUT_BASE_URL` (checkout_url base; default
+  `https://checkout.mock.invalid`).
+- customer-client: `CUSTOMER_CLIENT_PORT` (3000), `ORDER_SERVICE_URL`, `PAYMENT_SERVICE_URL`,
+  `CUSTOMER_CLIENT_ORDER_SERVICE_TOKEN` / `CUSTOMER_CLIENT_PAYMENT_SERVICE_TOKEN` (bearers, server-side
+  only), `CUSTOMER_CLIENT_UPSTREAM_TIMEOUT_MS` (10000), `MOCK_CHECKOUT_ENABLED` (dev only; then also
+  `SECRETS_MASTER_KEY`, `PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED`, optional `MOCK_CHECKOUT_WEBHOOK_URL`).
 
 ## Conventions
 - `createApp(deps)` takes its dependencies (repositories, tokens, clock `now`) so tests inject
@@ -166,6 +181,18 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   order_notifications_retried: [...] }`. Migration 003 adds `payments.order_notification_status`
   (null | SENT | REJECTED | FAILED), set by `notifyOrder` (webhook and worker); every run re-sends
   FAILED ones (`findUndeliveredOrderNotifications`).
+- WI-008 done: customer-client (CMP-008). Browser flow: cart → `POST /api/orders` → choose method
+  (card | upi | netbanking) → `POST /api/payments` with an `Idempotency-Key` minted per order+request
+  in sessionStorage (`createIdempotencyKeys`; reused on retry, forgotten after FAILED/EXPIRED) →
+  `checkoutAction(payment, now)` redirects only to an ACTIVE, unexpired session with an http(s)
+  checkout_url → back at `/?payment_id=` it polls `GET /api/payments/{id}` until final. `/api/*`
+  relays status + body unchanged (503 `<service>_unavailable` if unreachable), sends only the
+  schema's client fields, `Cache-Control: no-store`; all responses carry a `default-src 'self'` CSP
+  (no inline scripts/styles in pages). Customer id is a per-browser random UUID (placeholder for a
+  login). `/mock-checkout/{paymentId}` (dev): 410 if the session is not ACTIVE or past `expires_at`,
+  409 if the payment already has an outcome, 400 for a method other than the one chosen; pay/decline
+  sends a signed `captured`/`failed` webhook, then 303 to `/?payment_id=..&order_id=..`. Tests:
+  `test/customer-client/flow.test.js` runs client + order-service + payment-service end to end.
 - Not yet built: `POST /internal/payments/session-expiry-runs` (OP-008). Add it to the worker app
   next to OP-007 (same api_key), reusing `payments.expireCheckoutSession` (ACTIVE → EXPIRED only),
   `applyStatus` to EXPIRED with actor `reconciliation_job` and `notifyOrder`. Tests:

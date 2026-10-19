@@ -37,7 +37,8 @@ const retryPolicy = {
 const gatewayName = env.PAYMENT_GATEWAY_NAME ?? 'mock';
 const gateway =
   gatewayName === 'mock'
-    ? createMockGateway()
+    ? // MOCK_GATEWAY_CHECKOUT_BASE_URL: e.g. customer-client's dev checkout page (/mock-checkout).
+      createMockGateway({ checkoutBaseUrl: env.MOCK_GATEWAY_CHECKOUT_BASE_URL || undefined })
     : createHttpGateway({
         name: gatewayName,
         baseUrl: required('PAYMENT_GATEWAY_BASE_URL'),
