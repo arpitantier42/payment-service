@@ -1,4 +1,4 @@
-# Local stack: order-db (Postgres) + migrations + order-service.
+# Local stack: order-db + order-service, payment-db + payment-service (mock gateway), with migrations.
 #   docker compose up --build
 services:
   order-db:
@@ -39,5 +39,52 @@ services:
       order-db-migrate:
         condition: service_completed_successfully
 
+  payment-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+    ports:
+      - "5434:5432"
+    volumes:
+      - payment-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 2s
+      retries: 15
+
+  payment-db-migrate:
+    build: .
+    command: ["node", "src/shared/migrate.js", "db/payment-db/migrations"]
+    environment:
+      DATABASE_URL: postgres://payments:payments@payment-db:5432/payments
+    depends_on:
+      payment-db:
+        condition: service_healthy
+
+  payment-service:
+    build: .
+    command: ["node", "src/payment-service/server.js"]
+    environment:
+      DATABASE_URL: postgres://payments:payments@payment-db:5432/payments
+      PAYMENT_SERVICE_PORT: "3002"
+      PAYMENT_SERVICE_BEARER_TOKENS: ${PAYMENT_SERVICE_BEARER_TOKENS:-dev-token}
+      ORDER_SERVICE_URL: http://order-service:3001
+      ORDER_SERVICE_TOKEN: ${ORDER_SERVICE_TOKEN:-dev-token}
+      PAYMENT_GATEWAY_NAME: ${PAYMENT_GATEWAY_NAME:-mock}
+      PAYMENT_GATEWAY_BASE_URL: ${PAYMENT_GATEWAY_BASE_URL:-}
+      # DEV-ONLY sample key/ciphertext (see .env.example); override both outside local dev.
+      SECRETS_MASTER_KEY: ${SECRETS_MASTER_KEY:-i89Af/rOfrSD/yBWGLojMxsL/8HpyZFtsuQGXCEs0m0=}
+      PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED: ${PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED:-v1.Nnw6FhU1dlKO7axY.zFDG6IaY1UYfPWvvMX3fJw.gOhVSLLqsX5qzWBm53qAezq-51DQht_ruCwQgOjiaxVKxFZ_rCjoBsmEo8nh2VU0_eeZLcM}
+    ports:
+      - "3002:3002"
+    depends_on:
+      payment-db-migrate:
+        condition: service_completed_successfully
+      order-service:
+        condition: service_started
+
 volumes:
   order-db-data:
+  payment-db-data:

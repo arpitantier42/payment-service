@@ -8,7 +8,10 @@
   },
   "scripts": {
     "start:order-service": "node src/order-service/server.js",
+    "start:payment-service": "node src/payment-service/server.js",
     "migrate:order-db": "node src/shared/migrate.js db/order-db/migrations",
+    "migrate:payment-db": "node src/shared/migrate.js db/payment-db/migrations",
+    "encrypt-secret": "node src/shared/secrets.js",
     "test": "node --test --test-reporter=spec test/*/*.test.js"
   },
   "dependencies": {
