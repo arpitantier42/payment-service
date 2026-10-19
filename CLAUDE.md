@@ -223,3 +223,5 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   webhook after expiry → 200 `conflict` (WEBHOOK_CONFLICT audit, payment stays EXPIRED). The expiry
   scan uses migration 001's `checkout_sessions (status, expires_at)` index. `test/helpers/audit.js` exports
   `assertAuditTrailComplete(entries, currentStatus)` for new tests.
+  `test/reconciliation-worker/acceptance.test.js` runs the full stack (customer-client mock checkout
+  + order-/payment-service + worker over HTTP) with one test per WI-007 acceptance criterion (AC1–AC7).
