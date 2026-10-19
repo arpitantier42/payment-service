@@ -420,25 +420,217 @@ describe('POST /payments — gateway failures (REQ-010, NFR-004)', () => {
   });
 });
 
-describe('GET /payments/{paymentId}', () => {
+const getPayment = (id, auth = AUTH) => {
+  const req = request(app).get(`/payments/${id}`);
+  if (auth) req.set('Authorization', auth);
+  return req;
+};
+
+const PAYMENT_FIELDS = [
+  'amount',
+  'checkout_session',
+  'created_at',
+  'currency',
+  'gateway_name',
+  'gateway_reference',
+  'id',
+  'idempotency_key',
+  'order_id',
+  'payment_method',
+  'status',
+  'updated_at',
+];
+
+describe('GET /payments/{paymentId} — OP-005', () => {
   it('returns the payment with its checkout session', async () => {
     const order = await createOrder();
     const created = await initiate(paymentBody(order));
-    const res = await request(app).get(`/payments/${created.body.id}`).set('Authorization', AUTH);
+    const res = await getPayment(created.body.id);
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, created.body);
+    assert.deepEqual(Object.keys(res.body).sort(), PAYMENT_FIELDS);
   });
 
-  it('requires a bearer token', async () => {
-    const res = await request(app).get('/payments/00000000-0000-4000-8000-000000000000');
-    assert.equal(res.status, 401);
+  it('marks the response as not cacheable', async () => {
+    const order = await createOrder();
+    const created = await initiate(paymentBody(order));
+    assert.equal(created.headers['cache-control'], 'no-store');
+    const res = await getPayment(created.body.id);
+    assert.equal(res.headers['cache-control'], 'no-store');
+  });
+
+  it('reports the current stored status after a state change', async () => {
+    const order = await createOrder();
+    const created = await initiate(paymentBody(order));
+    const later = new Date(NOW.getTime() + 60_000);
+    await createPaymentRepository(paymentPool).updateStatus({
+      id: created.body.id,
+      from: 'INITIATED',
+      to: 'SUCCESS',
+      eventType: 'WEBHOOK_APPLIED',
+      actor: 'gateway_webhook',
+      metadata: null,
+      now: later,
+    });
+
+    const res = await getPayment(created.body.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, 'SUCCESS');
+    assert.equal(res.body.updated_at, later.toISOString());
+    assert.equal(res.body.created_at, NOW.toISOString());
+  });
+
+  it('returns a payment whose checkout was never created with null gateway fields', async () => {
+    const timeout = () => new UpstreamError('payment gateway timed out', { retryable: true });
+    gateway.script = [timeout(), timeout(), timeout()];
+    const order = await createOrder();
+    assert.equal((await initiate(paymentBody(order))).status, 502);
+    const { rows } = await paymentPool.query('select id from payments');
+
+    const res = await getPayment(rows[0].id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, 'INITIATED');
+    assert.equal(res.body.gateway_reference, null);
+    assert.equal(res.body.checkout_session, null);
+  });
+
+  it('accepts an upper-case UUID', async () => {
+    const order = await createOrder();
+    const created = await initiate(paymentBody(order));
+    const res = await getPayment(created.body.id.toUpperCase());
+    assert.equal(res.status, 200);
+    assert.equal(res.body.id, created.body.id);
+  });
+
+  it('reads payment-db only: no order-service or gateway call, no writes', async () => {
+    const order = await createOrder();
+    const created = await initiate(paymentBody(order));
+    const auditBefore = await countRows('audit_log_entries');
+    const callsBefore = gateway.calls.length;
+    orderClientDown = true;
+
+    const res = await getPayment(created.body.id);
+    assert.equal(res.status, 200);
+    assert.equal(gateway.calls.length, callsBefore);
+    assert.equal(await countRows('audit_log_entries'), auditBefore);
   });
 
   it('returns 404 for an unknown or malformed id', async () => {
     for (const id of ['00000000-0000-4000-8000-000000000000', 'not-a-uuid']) {
-      const res = await request(app).get(`/payments/${id}`).set('Authorization', AUTH);
+      const res = await getPayment(id);
       assert.equal(res.status, 404);
       assert.equal(res.body.error.code, 'payment_not_found');
     }
+  });
+});
+
+describe('GET /payments/{paymentId} — authentication (REQ-011, NFR-001)', () => {
+  let paymentId;
+  beforeEach(async () => {
+    const order = await createOrder();
+    paymentId = (await initiate(paymentBody(order))).body.id;
+  });
+
+  const rejected = [
+    ['no Authorization header', null],
+    ['an unknown bearer token', 'Bearer not-the-token'],
+    ['an empty bearer token', 'Bearer '],
+    ['a non-bearer scheme', `Basic ${Buffer.from(`user:${TOKEN}`).toString('base64')}`],
+    ['the raw token without a scheme', TOKEN],
+  ];
+  for (const [label, auth] of rejected) {
+    it(`rejects ${label} with 401 and does not reveal the payment`, async () => {
+      const res = await getPayment(paymentId, auth);
+      assert.equal(res.status, 401);
+      assert.equal(res.body.error.code, 'unauthorized');
+      assert.equal(res.headers['www-authenticate'], 'Bearer');
+      assert.ok(!JSON.stringify(res.body).includes(paymentId));
+    });
+  }
+
+  it('answers 401 (not 404) for an unknown id when unauthenticated, so ids cannot be probed', async () => {
+    const res = await getPayment('00000000-0000-4000-8000-000000000000', null);
+    assert.equal(res.status, 401);
+  });
+
+  it('does not accept an X-API-Key in place of a bearer token', async () => {
+    const res = await request(app).get(`/payments/${paymentId}`).set('X-API-Key', TOKEN);
+    assert.equal(res.status, 401);
+  });
+
+  it('accepts the bearer scheme case-insensitively', async () => {
+    const res = await getPayment(paymentId, `bearer ${TOKEN}`);
+    assert.equal(res.status, 200);
+  });
+});
+
+describe('payment security controls (REQ-011)', () => {
+  /**
+   * NFR-003 check: the status-changing audit entries of a payment form one unbroken chain from the
+   * creation event (previous_status null) to the payment's current status.
+   */
+  async function assertAuditTrailComplete(paymentId) {
+    const { status } = (await getPayment(paymentId)).body;
+    const entries = await auditFor(paymentId);
+    const changes = entries.filter((e) => e.previous_status === null || e.previous_status !== e.new_status);
+    const creation = changes.filter((e) => e.previous_status === null);
+    assert.equal(creation.length, 1, 'exactly one creation entry');
+    assert.equal(creation[0].event_type, 'PAYMENT_INITIATED');
+
+    let current = creation[0].new_status;
+    const remaining = changes.filter((e) => e !== creation[0]);
+    while (remaining.length) {
+      const i = remaining.findIndex((e) => e.previous_status === current);
+      assert.ok(i >= 0, `no audit entry continues the chain from ${current}`);
+      current = remaining.splice(i, 1)[0].new_status;
+    }
+    assert.equal(current, status, 'audit trail ends at the current status');
+    for (const e of entries) assert.ok(['system', 'gateway_webhook', 'reconciliation_job'].includes(e.actor));
+  }
+
+  it('records every payment state change in the audit log', async () => {
+    const repo = createPaymentRepository(paymentPool);
+
+    const okOrder = await createOrder();
+    const ok = (await initiate(paymentBody(okOrder), 'ok')).body;
+    await assertAuditTrailComplete(ok.id);
+    await repo.updateStatus({ id: ok.id, from: 'INITIATED', to: 'PENDING', eventType: 'STATUS_CHANGED', actor: 'gateway_webhook', now: NOW });
+    await repo.updateStatus({ id: ok.id, from: 'PENDING', to: 'SUCCESS', eventType: 'WEBHOOK_APPLIED', actor: 'gateway_webhook', now: NOW });
+    await assertAuditTrailComplete(ok.id);
+
+    gateway.script = [new UpstreamError('rejected (400)', { status: 400 })];
+    const rejectedOrder = await createOrder();
+    await initiate(paymentBody(rejectedOrder), 'rejected');
+    const { rows } = await paymentPool.query('select id from payments where idempotency_key = $1', ['rejected']);
+    await assertAuditTrailComplete(rows[0].id);
+  });
+
+  it('does not audit a compare-and-set that lost (no status change happened)', async () => {
+    const order = await createOrder();
+    const { id } = (await initiate(paymentBody(order))).body;
+    const before = await countRows('audit_log_entries');
+    const result = await createPaymentRepository(paymentPool).updateStatus({
+      id,
+      from: 'PENDING',
+      to: 'SUCCESS',
+      eventType: 'WEBHOOK_APPLIED',
+      actor: 'gateway_webhook',
+      now: NOW,
+    });
+    assert.equal(result, null);
+    assert.equal(await countRows('audit_log_entries'), before);
+    assert.equal((await getPayment(id)).body.status, 'INITIATED');
+  });
+
+  it('never exposes or stores the gateway credentials', async () => {
+    const order = await createOrder();
+    const created = await initiate(paymentBody(order));
+    const fetched = await getPayment(created.body.id);
+    for (const body of [created.text, fetched.text]) {
+      assert.ok(!body.includes(KEY_SECRET));
+      assert.ok(!body.includes('rzp_key'));
+    }
+    const { rows } = await paymentPool.query('select * from audit_log_entries');
+    assert.ok(!JSON.stringify(rows).includes(KEY_SECRET));
   });
 });

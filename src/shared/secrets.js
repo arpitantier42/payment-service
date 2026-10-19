@@ -35,11 +35,19 @@ export function decryptSecret(sealed, masterKey) {
 }
 
 /**
- * @param {{ encryptedGatewayCredentials: string, masterKey: string }} config
- *   `encryptedGatewayCredentials` decrypts to JSON `{ "key_id": "...", "key_secret": "..." }`.
+ * @param {{ encryptedGatewayCredentials: string, encryptedWebhookSecret?: string, masterKey: string }} config
+ *   `encryptedGatewayCredentials` decrypts to JSON `{ "key_id": "...", "key_secret": "..." }`;
+ *   `encryptedWebhookSecret` to the webhook signing secret (plain string).
  */
-export function createEncryptedSecretsManager({ encryptedGatewayCredentials, masterKey }) {
+export function createEncryptedSecretsManager({ encryptedGatewayCredentials, encryptedWebhookSecret, masterKey }) {
   return {
+    /** HMAC key the gateway signs webhooks with (sealed like the credentials). */
+    async getWebhookSecret() {
+      if (!encryptedWebhookSecret) throw new Error('gateway webhook secret is not configured');
+      const secret = decryptSecret(encryptedWebhookSecret, masterKey);
+      if (!secret) throw new Error('gateway webhook secret is empty');
+      return secret;
+    },
     async getGatewayCredentials() {
       const { key_id: keyId, key_secret: keySecret } = JSON.parse(
         decryptSecret(encryptedGatewayCredentials, masterKey),

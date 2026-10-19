@@ -27,5 +27,15 @@ export function checkTransition(from, to) {
   return TRANSITIONS[from]?.includes(to) ? 'allowed' : 'invalid';
 }
 
+/**
+ * Order status a payment outcome maps to for PATCH /orders/{id}/status (REQ-009), or null when
+ * the order is not notified (INITIATED/PENDING: outcome unknown yet).
+ */
+export function orderStatusFor(paymentStatus) {
+  if (paymentStatus === PaymentStatus.SUCCESS) return 'PAID';
+  if (paymentStatus === PaymentStatus.FAILED || paymentStatus === PaymentStatus.EXPIRED) return 'PAYMENT_FAILED';
+  return null;
+}
+
 /** Order statuses a payment may be started for (a failed payment can be retried). */
 export const PAYABLE_ORDER_STATUSES = Object.freeze(['PENDING_PAYMENT', 'PAYMENT_FAILED']);

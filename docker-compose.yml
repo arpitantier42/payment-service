@@ -1,4 +1,5 @@
-# Local stack: order-db + order-service, payment-db + payment-service (mock gateway), with migrations.
+# Local stack: order-db + order-service, payment-db + payment-service (mock gateway) +
+# reconciliation-worker + customer-client (http://localhost:3000), with migrations.
 #   docker compose up --build
 services:
   order-db:
@@ -72,17 +73,75 @@ services:
       PAYMENT_SERVICE_BEARER_TOKENS: ${PAYMENT_SERVICE_BEARER_TOKENS:-dev-token}
       ORDER_SERVICE_URL: http://order-service:3001
       ORDER_SERVICE_TOKEN: ${ORDER_SERVICE_TOKEN:-dev-token}
+      ORDER_SERVICE_API_KEY: ${ORDER_SERVICE_API_KEY:-dev-internal-key}
       PAYMENT_GATEWAY_NAME: ${PAYMENT_GATEWAY_NAME:-mock}
       PAYMENT_GATEWAY_BASE_URL: ${PAYMENT_GATEWAY_BASE_URL:-}
+      # Browser-facing URL of customer-client's dev hosted-checkout page (mock gateway only).
+      MOCK_GATEWAY_CHECKOUT_BASE_URL: ${MOCK_GATEWAY_CHECKOUT_BASE_URL:-http://localhost:3000/mock-checkout}
       # DEV-ONLY sample key/ciphertext (see .env.example); override both outside local dev.
       SECRETS_MASTER_KEY: ${SECRETS_MASTER_KEY:-i89Af/rOfrSD/yBWGLojMxsL/8HpyZFtsuQGXCEs0m0=}
       PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED: ${PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED:-v1.Nnw6FhU1dlKO7axY.zFDG6IaY1UYfPWvvMX3fJw.gOhVSLLqsX5qzWBm53qAezq-51DQht_ruCwQgOjiaxVKxFZ_rCjoBsmEo8nh2VU0_eeZLcM}
+      PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED: ${PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED:-v1.603TQl1HE8P2Bhhx.oEl-aUVONF4glRrJAY5Pww.vK2YArmivX0Jjp-gIREuFS7IV6wfTrt37A4}
     ports:
       - "3002:3002"
     depends_on:
       payment-db-migrate:
         condition: service_completed_successfully
       order-service:
+        condition: service_started
+
+  # CMP-006: separate deployable; reconciles on its own schedule (RECONCILIATION_INTERVAL_MINUTES)
+  # and accepts on-demand runs: curl -X POST -H 'X-API-Key: dev-scheduler-key'
+  #   localhost:3003/internal/payments/reconciliation-runs
+  reconciliation-worker:
+    build: .
+    command: ["node", "src/reconciliation-worker/server.js"]
+    environment:
+      DATABASE_URL: postgres://payments:payments@payment-db:5432/payments
+      RECONCILIATION_WORKER_PORT: "3003"
+      RECONCILIATION_WORKER_API_KEYS: ${RECONCILIATION_WORKER_API_KEYS:-dev-scheduler-key}
+      RECONCILIATION_THRESHOLD_MINUTES: ${RECONCILIATION_THRESHOLD_MINUTES:-10}
+      RECONCILIATION_INTERVAL_MINUTES: ${RECONCILIATION_INTERVAL_MINUTES:-15}
+      RECONCILIATION_BATCH_SIZE: ${RECONCILIATION_BATCH_SIZE:-100}
+      SESSION_EXPIRY_INTERVAL_MINUTES: ${SESSION_EXPIRY_INTERVAL_MINUTES:-5}
+      SESSION_EXPIRY_GRACE_SECONDS: ${SESSION_EXPIRY_GRACE_SECONDS:-60}
+      ORDER_SERVICE_URL: http://order-service:3001
+      ORDER_SERVICE_API_KEY: ${ORDER_SERVICE_API_KEY:-dev-internal-key}
+      PAYMENT_GATEWAY_NAME: ${PAYMENT_GATEWAY_NAME:-mock}
+      PAYMENT_GATEWAY_BASE_URL: ${PAYMENT_GATEWAY_BASE_URL:-}
+      MOCK_GATEWAY_TRANSACTION_STATUS: ${MOCK_GATEWAY_TRANSACTION_STATUS:-created}
+      # DEV-ONLY sample key/ciphertext (see .env.example); override both outside local dev.
+      SECRETS_MASTER_KEY: ${SECRETS_MASTER_KEY:-i89Af/rOfrSD/yBWGLojMxsL/8HpyZFtsuQGXCEs0m0=}
+      PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED: ${PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED:-v1.Nnw6FhU1dlKO7axY.zFDG6IaY1UYfPWvvMX3fJw.gOhVSLLqsX5qzWBm53qAezq-51DQht_ruCwQgOjiaxVKxFZ_rCjoBsmEo8nh2VU0_eeZLcM}
+    ports:
+      - "3003:3003"
+    depends_on:
+      payment-db-migrate:
+        condition: service_completed_successfully
+      order-service:
+        condition: service_started
+
+  # CMP-008: browser UI + same-origin /api at http://localhost:3000. With the mock gateway it also
+  # serves the dev hosted-checkout page (/mock-checkout) that sends the signed webhook.
+  customer-client:
+    build: .
+    command: ["node", "src/customer-client/server.js"]
+    environment:
+      CUSTOMER_CLIENT_PORT: "3000"
+      ORDER_SERVICE_URL: http://order-service:3001
+      PAYMENT_SERVICE_URL: http://payment-service:3002
+      CUSTOMER_CLIENT_ORDER_SERVICE_TOKEN: ${CUSTOMER_CLIENT_ORDER_SERVICE_TOKEN:-dev-token}
+      CUSTOMER_CLIENT_PAYMENT_SERVICE_TOKEN: ${CUSTOMER_CLIENT_PAYMENT_SERVICE_TOKEN:-dev-token}
+      MOCK_CHECKOUT_ENABLED: ${MOCK_CHECKOUT_ENABLED:-true}
+      # DEV-ONLY sample key/ciphertext, same as payment-service's (signs mock webhooks).
+      SECRETS_MASTER_KEY: ${SECRETS_MASTER_KEY:-i89Af/rOfrSD/yBWGLojMxsL/8HpyZFtsuQGXCEs0m0=}
+      PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED: ${PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED:-v1.603TQl1HE8P2Bhhx.oEl-aUVONF4glRrJAY5Pww.vK2YArmivX0Jjp-gIREuFS7IV6wfTrt37A4}
+    ports:
+      - "3000:3000"
+    depends_on:
+      order-service:
+        condition: service_started
+      payment-service:
         condition: service_started
 
 volumes:

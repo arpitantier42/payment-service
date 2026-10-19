@@ -37,7 +37,8 @@ const retryPolicy = {
 const gatewayName = env.PAYMENT_GATEWAY_NAME ?? 'mock';
 const gateway =
   gatewayName === 'mock'
-    ? createMockGateway()
+    ? // MOCK_GATEWAY_CHECKOUT_BASE_URL: e.g. customer-client's dev checkout page (/mock-checkout).
+      createMockGateway({ checkoutBaseUrl: env.MOCK_GATEWAY_CHECKOUT_BASE_URL || undefined })
     : createHttpGateway({
         name: gatewayName,
         baseUrl: required('PAYMENT_GATEWAY_BASE_URL'),
@@ -46,14 +47,18 @@ const gateway =
 
 const secrets = createEncryptedSecretsManager({
   encryptedGatewayCredentials: required('PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED'),
+  encryptedWebhookSecret: required('PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED'),
   masterKey: required('SECRETS_MASTER_KEY'),
 });
-// Fail at startup rather than on the first payment if the credentials cannot be decrypted.
+// Fail at startup rather than on the first payment/webhook if the secrets cannot be decrypted.
 await secrets.getGatewayCredentials();
+await secrets.getWebhookSecret();
 
 const orders = createOrderClient({
   baseUrl: required('ORDER_SERVICE_URL'),
   token: required('ORDER_SERVICE_TOKEN'),
+  // X-API-Key for PATCH /orders/{id}/status (one of order-service's ORDER_SERVICE_API_KEYS).
+  apiKey: required('ORDER_SERVICE_API_KEY'),
   timeoutMs: int('ORDER_SERVICE_TIMEOUT_MS', 3_000),
   retryPolicy,
 });
