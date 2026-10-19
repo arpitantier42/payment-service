@@ -75,7 +75,7 @@ const sessionExpirer = createSessionExpirer({
   payments: createPaymentRepository(pool),
   orders,
   graceMs: int('SESSION_EXPIRY_GRACE_SECONDS', 60) * 1000,
-  batchSize: Math.max(1, int('RECONCILIATION_BATCH_SIZE', 100)),
+  batchSize: Math.max(1, int('SESSION_EXPIRY_BATCH_SIZE', int('RECONCILIATION_BATCH_SIZE', 100))),
 });
 
 const app = createApp({ reconciler, sessionExpirer, apiKeys });

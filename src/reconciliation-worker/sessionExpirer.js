@@ -17,7 +17,9 @@ const ACTOR = 'reconciliation_job';
  *   INITIATED          -> payment EXPIRED, session EXPIRED, order notified          ('expired')
  *   PENDING            -> session EXPIRED only: the gateway has reported a charge in progress, so
  *                         the outcome is left to webhook / reconciliation, which ask the gateway
- *                         (SESSION_EXPIRY_DEFERRED audit)                           ('deferred')
+ *                         (SESSION_EXPIRY_DEFERRED audit)                           ('deferred');
+ *                         if the gateway then reports no attempt in flight ("created"/"open"),
+ *                         the reconciliation run marks it EXPIRED because the window has lapsed
  *   SUCCESS / FAILED   -> outcome already known, session marked COMPLETED          ('already_resolved')
  *   EXPIRED            -> session EXPIRED                                          ('unchanged')
  * Either way the session is no longer ACTIVE, so it is not selected again.

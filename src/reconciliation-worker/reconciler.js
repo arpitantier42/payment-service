@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_RETRY_POLICY, withRetry } from '../shared/retry.js';
-import { TRANSACTION_NOT_FOUND } from '../payment-service/gateway.js';
+import { isAwaitingCustomer, TRANSACTION_NOT_FOUND } from '../payment-service/gateway.js';
 import { createPaymentOutcomes } from '../payment-service/paymentOutcome.js';
 import { PaymentStatus } from '../payment-service/paymentStatus.js';
 
@@ -52,8 +52,11 @@ export function createReconciler({
     }
   }
 
-  /** Decides what the gateway's answer means for `payment`: `{ target }` or `{ hold, reason }`. */
-  function decide(payment, tx) {
+  /**
+   * Decides what the gateway's answer means for `payment` (and its checkout session):
+   * `{ target, reason? }` or `{ hold, reason }`.
+   */
+  function decide(payment, tx, session) {
     if (tx.status === TRANSACTION_NOT_FOUND) {
       // No checkout was ever opened at the gateway (the initiation call failed and nobody resumed
       // it): nothing can be charged, so the attempt failed and the order is free for a new one.
@@ -67,6 +70,15 @@ export function createReconciler({
       mismatched.push('gateway_reference');
     }
     if (mismatched.length) return { hold: 'RECONCILIATION_MISMATCH', reason: 'details_mismatch', mismatched };
+    if (isAwaitingCustomer(tx.gatewayStatus)) {
+      // OP-008 interplay (REQ-006): the customer has not attempted payment. Once the checkout
+      // window has lapsed nothing can still be charged, so the attempt expired; before that the
+      // payment stays INITIATED (not PENDING), so the session-expiry run can still expire it.
+      if (session && session.status !== 'COMPLETED' && new Date(session.expires_at) <= now()) {
+        return { target: PaymentStatus.EXPIRED, reason: 'checkout_window_lapsed' };
+      }
+      if (payment.status === PaymentStatus.INITIATED) return { hold: 'RECONCILIATION_UNRESOLVED', reason: 'awaiting_customer' };
+    }
     return { target: tx.status };
   }
 
@@ -99,7 +111,8 @@ export function createReconciler({
     metadata.gateway_status = tx.gatewayStatus;
     result.gateway_status = tx.gatewayStatus;
 
-    const decision = decide(payment, tx);
+    const session = (await payments.findById(payment.id))?.checkoutSession ?? null;
+    const decision = decide(payment, tx, session);
     if (decision.hold) {
       await audit(decision.hold, payment.status, { reason: decision.reason, mismatched: decision.mismatched });
       if (decision.hold === 'RECONCILIATION_MISMATCH') {
@@ -114,7 +127,7 @@ export function createReconciler({
       to: decision.target,
       eventType: 'RECONCILED',
       actor: ACTOR,
-      metadata: { ...metadata, decision: decision.target },
+      metadata: { ...metadata, decision: decision.target, ...(decision.reason && { reason: decision.reason }) },
     });
     if (applied.result === 'not_found') return { ...result, outcome: 'not_found' };
     if (applied.result === 'unchanged') {

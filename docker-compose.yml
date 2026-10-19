@@ -90,9 +90,10 @@ services:
       order-service:
         condition: service_started
 
-  # CMP-006: separate deployable; reconciles on its own schedule (RECONCILIATION_INTERVAL_MINUTES)
-  # and accepts on-demand runs: curl -X POST -H 'X-API-Key: dev-scheduler-key'
-  #   localhost:3003/internal/payments/reconciliation-runs
+  # CMP-006: separate deployable; reconciles (RECONCILIATION_INTERVAL_MINUTES) and expires lapsed
+  # checkout sessions (SESSION_EXPIRY_INTERVAL_MINUTES) on its own schedules, and accepts on-demand
+  # runs: curl -X POST -H 'X-API-Key: dev-scheduler-key'
+  #   localhost:3003/internal/payments/reconciliation-runs   (or .../session-expiry-runs)
   reconciliation-worker:
     build: .
     command: ["node", "src/reconciliation-worker/server.js"]
@@ -105,6 +106,7 @@ services:
       RECONCILIATION_BATCH_SIZE: ${RECONCILIATION_BATCH_SIZE:-100}
       SESSION_EXPIRY_INTERVAL_MINUTES: ${SESSION_EXPIRY_INTERVAL_MINUTES:-5}
       SESSION_EXPIRY_GRACE_SECONDS: ${SESSION_EXPIRY_GRACE_SECONDS:-60}
+      SESSION_EXPIRY_BATCH_SIZE: ${SESSION_EXPIRY_BATCH_SIZE:-100}
       ORDER_SERVICE_URL: http://order-service:3001
       ORDER_SERVICE_API_KEY: ${ORDER_SERVICE_API_KEY:-dev-internal-key}
       PAYMENT_GATEWAY_NAME: ${PAYMENT_GATEWAY_NAME:-mock}

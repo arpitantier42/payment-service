@@ -78,7 +78,7 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   `ORDER_SERVICE_TIMEOUT_MS`, `PAYMENT_GATEWAY_*`, `SECRETS_MASTER_KEY`,
   `PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED`; `MOCK_GATEWAY_TRANSACTION_STATUS` (mock only, default
   `created`); `SESSION_EXPIRY_INTERVAL_MINUTES` (5; 0 = HTTP-triggered only),
-  `SESSION_EXPIRY_GRACE_SECONDS` (60).
+  `SESSION_EXPIRY_GRACE_SECONDS` (60), `SESSION_EXPIRY_BATCH_SIZE` (defaults to `RECONCILIATION_BATCH_SIZE`).
 - payment-service, mock gateway only: `MOCK_GATEWAY_CHECKOUT_BASE_URL` (checkout_url base; default
   `https://checkout.mock.invalid`).
 - customer-client: `CUSTOMER_CLIENT_PORT` (3000), `ORDER_SERVICE_URL`, `PAYMENT_SERVICE_URL`,
@@ -213,3 +213,15 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   grace_seconds, examined, outcomes, sessions: [...] }`. Tests:
   `test/reconciliation-worker/sessionExpiry.test.js`; `reconciliation.test.js` shows a fake gateway
   with scripted status answers, a shared mutable clock, and order-service outages via `fetchImpl`.
+- WI-007 done (OP-008 hardening + QA + ops). Reconciliation/expiry interplay: gateway states meaning
+  "checkout open, customer has not paid" (`isAwaitingCustomer` in gateway.js: created | open |
+  requires_payment_method) never make a payment PENDING. The reconciler holds an INITIATED one
+  (RECONCILIATION_UNRESOLVED, outcome `awaiting_customer`) so the expiry run can still expire it, and
+  once the checkout session's `expires_at` has passed it sets INITIATED/PENDING → EXPIRED itself
+  (RECONCILED, metadata `reason: checkout_window_lapsed`). Otherwise a reconcile before expiry left
+  abandoned checkouts PENDING forever, blocking the order (`payment_in_progress`). A completion
+  webhook after expiry → 200 `conflict` (WEBHOOK_CONFLICT audit, payment stays EXPIRED). The expiry
+  scan uses migration 001's `checkout_sessions (status, expires_at)` index. `test/helpers/audit.js` exports
+  `assertAuditTrailComplete(entries, currentStatus)` for new tests.
+  `test/reconciliation-worker/acceptance.test.js` runs the full stack (customer-client mock checkout
+  + order-/payment-service + worker over HTTP) with one test per WI-007 acceptance criterion (AC1–AC7).
