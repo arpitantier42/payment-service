@@ -215,6 +215,42 @@ export function createPaymentRepository(pool) {
       ]);
     },
 
+    /** Marks the payment's ACTIVE checkout session EXPIRED (the window lapsed without an outcome). */
+    async expireCheckoutSession(paymentId) {
+      await pool.query(`update checkout_sessions set status = 'EXPIRED' where payment_id = $1 and status = 'ACTIVE'`, [
+        paymentId,
+      ]);
+    },
+
+    /**
+     * REQ-010: INITIATED/PENDING payments whose status has not changed since `cutoff`, oldest
+     * first, at most `limit` (reconciliation batch).
+     */
+    async findStuckPayments({ cutoff, limit }) {
+      const { rows } = await pool.query(
+        `select ${PAYMENT_COLUMNS} from payments
+         where status in ('INITIATED', 'PENDING') and updated_at <= $1
+         order by updated_at, id limit $2`,
+        [cutoff, limit],
+      );
+      return rows.map(toPayment);
+    },
+
+    /** Records how the order-service notification for this payment ended (SENT | REJECTED | FAILED). */
+    async setOrderNotificationStatus(paymentId, status) {
+      await pool.query('update payments set order_notification_status = $2 where id = $1', [paymentId, status]);
+    },
+
+    /** Resolved payments whose order notification is still owed (order-service was unreachable). */
+    async findUndeliveredOrderNotifications({ limit }) {
+      const { rows } = await pool.query(
+        `select ${PAYMENT_COLUMNS} from payments where order_notification_status = 'FAILED'
+         order by updated_at, id limit $1`,
+        [limit],
+      );
+      return rows.map(toPayment);
+    },
+
     /**
      * Records a verified webhook delivery as RECEIVED, deduped by gateway event id (REQ-010).
      * Returns `{ event, duplicate }`: on a repeat delivery, `event` is the stored one and

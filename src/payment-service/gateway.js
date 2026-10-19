@@ -7,6 +7,8 @@ import { fetchUpstream, UpstreamError } from '../shared/retry.js';
  *
  *   createCheckoutSession({ credentials, payment, expiresAt })
  *     -> { gatewaySessionId, gatewayReference, checkoutUrl }
+ *   getTransactionStatus({ credentials, payment })          (reconciliation-worker)
+ *     -> { status: SUCCESS|FAILED|PENDING|EXPIRED|NOT_FOUND, gatewayStatus, gatewayReference, amount, currency }
  *
  * One call = one attempt; the caller wraps it in `withRetry`. Failures throw `UpstreamError`
  * (`retryable` for network errors, timeouts, 5xx, 429). Requests carry the payment id as the
@@ -60,11 +62,37 @@ export function createHttpGateway({ name, baseUrl, timeoutMs = 10_000, fetchImpl
         checkoutUrl: body.checkout_url,
       };
     },
+
+    /**
+     * Transaction status query used by reconciliation (OP-007, REQ-010):
+     *   GET {baseUrl}/transactions/{payment id}   (the `reference` sent at checkout; Basic auth)
+     *   2xx { status, amount?, currency?, transaction_id? }   404 = the gateway has no such transaction
+     * Returns `parseTransactionStatus(body)` or `{ status: 'NOT_FOUND' }`.
+     */
+    async getTransactionStatus({ credentials, payment }) {
+      const auth = Buffer.from(`${credentials.keyId}:${credentials.keySecret}`).toString('base64');
+      const res = await fetchUpstream('payment gateway', `${root}/transactions/${encodeURIComponent(payment.id)}`, {
+        method: 'GET',
+        timeoutMs,
+        fetchImpl,
+        headers: { authorization: `Basic ${auth}`, accept: 'application/json' },
+      });
+      if (res.status === 404) return { status: TRANSACTION_NOT_FOUND, gatewayStatus: null };
+      if (!res.ok) {
+        throw new UpstreamError(`payment gateway rejected the status query (${res.status})`, { status: res.status });
+      }
+      const parsed = parseTransactionStatus(await res.json().catch(() => null));
+      if (!parsed) throw new UpstreamError('payment gateway returned an unexpected status response');
+      return parsed;
+    },
   };
 }
 
-/** Offline gateway for local runs (PAYMENT_GATEWAY_NAME=mock): accepts every checkout. */
-export function createMockGateway({ checkoutBaseUrl = 'https://checkout.mock.invalid' } = {}) {
+/**
+ * Offline gateway for local runs (PAYMENT_GATEWAY_NAME=mock): accepts every checkout and reports
+ * every transaction as `transactionStatus` (default "created": still awaiting the customer).
+ */
+export function createMockGateway({ checkoutBaseUrl = 'https://checkout.mock.invalid', transactionStatus = 'created' } = {}) {
   return {
     name: 'mock',
     async createCheckoutSession({ payment }) {
@@ -74,6 +102,45 @@ export function createMockGateway({ checkoutBaseUrl = 'https://checkout.mock.inv
         checkoutUrl: `${checkoutBaseUrl}/${payment.id}`,
       };
     },
+    async getTransactionStatus({ payment }) {
+      return parseTransactionStatus({ status: transactionStatus, transaction_id: payment.gateway_reference });
+    },
+  };
+}
+
+/** `getTransactionStatus` result when the gateway has no record of the payment. */
+export const TRANSACTION_NOT_FOUND = 'NOT_FOUND';
+
+/**
+ * Provider states a status query can report -> payment status. Adds the "no outcome yet" and
+ * "checkout window lapsed" states a webhook never carries to the webhook mapping.
+ */
+const TRANSACTION_STATUS_MAP = Object.freeze({
+  created: 'PENDING',
+  open: 'PENDING',
+  requires_payment_method: 'PENDING',
+  expired: 'EXPIRED',
+});
+
+/**
+ * Normalises a status-query body to `{ status, gatewayStatus, gatewayReference, amount, currency }`
+ * (amount/currency/reference null when absent), or null when the status is not recognised.
+ */
+export function parseTransactionStatus(body) {
+  if (!body || typeof body !== 'object' || typeof body.status !== 'string') return null;
+  const key = body.status.toLowerCase();
+  const status = Object.hasOwn(WEBHOOK_STATUS_MAP, key)
+    ? WEBHOOK_STATUS_MAP[key]
+    : Object.hasOwn(TRANSACTION_STATUS_MAP, key)
+      ? TRANSACTION_STATUS_MAP[key]
+      : undefined;
+  if (!status) return null;
+  return {
+    status,
+    gatewayStatus: body.status,
+    gatewayReference: typeof body.transaction_id === 'string' ? body.transaction_id : null,
+    amount: Number.isSafeInteger(body.amount) ? body.amount : null,
+    currency: typeof body.currency === 'string' ? body.currency.toUpperCase() : null,
   };
 }
 

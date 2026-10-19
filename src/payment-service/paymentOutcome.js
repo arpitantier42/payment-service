@@ -55,8 +55,11 @@ export function createPaymentOutcomes({ payments, orders, now = () => new Date()
         ({ outcome } = await orders.updateOrderStatus(payment.order_id, orderStatus));
       } catch (err) {
         await audit('ORDER_NOTIFICATION_FAILED', { error: err?.message ?? String(err), attempts: err?.attempts ?? 1 });
+        // Owed: the reconciliation run re-sends it (payments.order_notification_status).
+        await payments.setOrderNotificationStatus(payment.id, 'FAILED');
         throw err;
       }
+      await payments.setOrderNotificationStatus(payment.id, outcome === 'applied' ? 'SENT' : 'REJECTED');
       if (outcome !== 'applied') {
         // The order moved on (e.g. CANCELLED, or PAID by another payment) or does not exist:
         // retrying cannot help; keep a record for investigation (e.g. a refund).

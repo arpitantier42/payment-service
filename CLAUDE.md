@@ -24,6 +24,9 @@ src/payment-service/  app.js, server.js, paymentRepository.js (SQL + audit + web
                       http + mock checkout, webhook signature/payload parsing), orderClient.js
                       (GET /orders/{id}, PATCH /orders/{id}/status), paymentOutcome.js (applyStatus +
                       notifyOrder, shared by webhook and reconciliation)
+src/reconciliation-worker/  app.js (api_key routes), server.js (env, in-process interval schedule),
+                      reconciler.js (OP-007 run). Reuses payment-service's repository, gateway,
+                      orderClient and paymentOutcome modules (same payment-db).
 db/<db-name>/migrations/NNN_description.sql   one dir per store (order-db, payment-db)
 test/helpers/db.js    createTestPool('<db-name>') -> pg-mem pool with migrations applied
 test/<component>/*.test.js
@@ -38,9 +41,12 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
 - Run: `DATABASE_URL=... ORDER_SERVICE_BEARER_TOKENS=dev-token ORDER_SERVICE_API_KEYS=dev-internal-key npm run start:order-service`
 - Run payment-service: export the payment block of `.env.example` (DATABASE_URL → payment-db), then
   `npm run start:payment-service`
+- Run reconciliation-worker: payment block + worker block of `.env.example` (DATABASE_URL →
+  payment-db), then `npm run start:reconciliation-worker`; trigger a run with
+  `curl -X POST -H 'X-API-Key: dev-scheduler-key' localhost:3003/internal/payments/reconciliation-runs`
 - Encrypt gateway credentials: `SECRETS_MASTER_KEY=... npm run encrypt-secret -- '{"key_id":"..","key_secret":".."}'`
 - Full local stack: `docker compose up --build` (order-db :5433, order-service :3001,
-  payment-db :5434, payment-service :3002 with the mock gateway)
+  payment-db :5434, payment-service :3002 with the mock gateway, reconciliation-worker :3003)
 
 ## Configuration (env, see .env.example)
 - `DATABASE_URL` — Postgres connection string for the service's store.
@@ -55,6 +61,13 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   sealed `{"key_id","key_secret"}`), `PAYMENT_GATEWAY_WEBHOOK_SECRET_ENCRYPTED` (sealed webhook
   HMAC secret, same `encrypt-secret` CLI), `ORDER_SERVICE_API_KEY` (X-API-Key for the order PATCH).
   All required at startup. The values in .env.example / compose are dev-only samples.
+- reconciliation-worker: `DATABASE_URL` (payment-db), `RECONCILIATION_WORKER_PORT` (3003),
+  `RECONCILIATION_WORKER_API_KEYS` (scheduler X-API-Keys), `RECONCILIATION_THRESHOLD_MINUTES` (10),
+  `RECONCILIATION_INTERVAL_MINUTES` (15; 0 = only HTTP-triggered, e.g. by a k8s CronJob),
+  `RECONCILIATION_BATCH_SIZE` (100), plus `ORDER_SERVICE_URL`, `ORDER_SERVICE_API_KEY`,
+  `ORDER_SERVICE_TIMEOUT_MS`, `PAYMENT_GATEWAY_*`, `SECRETS_MASTER_KEY`,
+  `PAYMENT_GATEWAY_CREDENTIALS_ENCRYPTED`; `MOCK_GATEWAY_TRANSACTION_STATUS` (mock only, default
+  `created`).
 
 ## Conventions
 - `createApp(deps)` takes its dependencies (repositories, tokens, clock `now`) so tests inject
@@ -136,9 +149,25 @@ New services go in `src/<service-name>/` with the same app.js/server.js split, t
   ORDER_NOTIFICATION_REJECTED audit, not retried) → APPLIED, 200 with the `WebhookEvent` +
   `outcome` + `payment_status`. `webhook_events.outcome` is an extra column (applied | unchanged |
   stale | conflict | unknown_payment | details_mismatch).
-- Not yet built: reconciliation-worker. Reuse `createPaymentOutcomes` (`paymentOutcome.js`) with
-  actor `reconciliation_job` and `createOrderClient({ apiKey })` for the order PATCH (configure a
-  key from `ORDER_SERVICE_API_KEYS`). Mark checkout sessions COMPLETED/EXPIRED consistently
-  (webhook sets COMPLETED; only expire ACTIVE ones). `payments.order_id` has no FK (orders live in
-  order-db). Tests: `test/payment-service/webhooks.test.js` shows signing deliveries
-  (`signWebhookPayload`) and simulating order-service outages via `fetchImpl`.
+- WI-006 done: reconciliation-worker (`src/reconciliation-worker`, own deployable, compose service)
+  with `POST /internal/payments/reconciliation-runs` (api_key = `RECONCILIATION_WORKER_API_KEYS`;
+  bearer/order keys don't satisfy it). `reconciler.run()` (shared by HTTP + interval; overlapping
+  calls share the in-flight run): select INITIATED/PENDING with `updated_at <= now - threshold`
+  (`findStuckPayments`, oldest first, batch) → `gateway.getTransactionStatus` (GET
+  `{base}/transactions/{payment id}`, 404 → `NOT_FOUND`; `parseTransactionStatus` maps provider
+  states incl. created/open → PENDING, expired → EXPIRED) wrapped in `withRetry` → decide:
+  NOT_FOUND + INITIATED without gateway_reference → FAILED; NOT_FOUND otherwise / amount, currency or
+  reference mismatch → no change (RECONCILIATION_UNRESOLVED / RECONCILIATION_MISMATCH audit) →
+  `applyStatus` (eventType `RECONCILED`, actor `reconciliation_job`; unchanged PENDING →
+  RECONCILIATION_UNRESOLVED; lost to a webhook → RECONCILIATION_IGNORED/_CONFLICT) → session
+  COMPLETED (SUCCESS/FAILED) or EXPIRED (EXPIRED) → `notifyOrder`. Gateway still failing →
+  RECONCILIATION_GATEWAY_FAILED audit, payment picked up next run. 200 body: `{ run_id, started_at,
+  finished_at, threshold_seconds, examined, outcomes: {outcome: n}, payments: [...],
+  order_notifications_retried: [...] }`. Migration 003 adds `payments.order_notification_status`
+  (null | SENT | REJECTED | FAILED), set by `notifyOrder` (webhook and worker); every run re-sends
+  FAILED ones (`findUndeliveredOrderNotifications`).
+- Not yet built: `POST /internal/payments/session-expiry-runs` (OP-008). Add it to the worker app
+  next to OP-007 (same api_key), reusing `payments.expireCheckoutSession` (ACTIVE → EXPIRED only),
+  `applyStatus` to EXPIRED with actor `reconciliation_job` and `notifyOrder`. Tests:
+  `test/reconciliation-worker/reconciliation.test.js` shows a fake gateway with scripted status
+  answers, a shared mutable clock, and order-service outages via `fetchImpl`.
